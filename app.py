@@ -146,6 +146,16 @@ def add_item(name, price, category):
             c.execute("insert into items(name, price, category) values(?, ?, ?)", (name, float(price), category))
 
 
+def update_item(item_id, name, price):
+    if SHEETS:
+        ws = book().worksheet("items")
+        ws.update_cell(int(item_id), 1, name)
+        ws.update_cell(int(item_id), 2, float(price))
+    else:
+        with conn() as c:
+            c.execute("update items set name=?, price=? where id=?", (name, float(price), int(item_id)))
+
+
 def delete_item(item_id):
     if SHEETS:
         book().worksheet("items").delete_rows(int(item_id))
@@ -333,6 +343,23 @@ def add_dialog():
             refresh()
 
 
+@st.dialog("تعديل المنتج")
+def edit_dialog(item_id, name, price):
+    n = st.text_input("المنتج", value=name)
+    p = st.number_input("السعر", min_value=0.0, step=0.5, value=float(price))
+    if st.button("حفظ التعديل", type="primary"):
+        if not n.strip():
+            st.error("اكتب اسم المنتج")
+        else:
+            update_item(item_id, n.strip(), p)
+            st.session_state.get("cart", {}).pop(name, None)
+            refresh()
+    if st.button("🗑️ حذف المنتج"):
+        delete_item(item_id)
+        st.session_state.get("cart", {}).pop(name, None)
+        refresh()
+
+
 with tab_items:
     if st.button("➕ إضافة صنف", type="primary"):
         add_dialog()
@@ -356,9 +383,8 @@ with tab_items:
             for r in chosen.itertuples():
                 c1, c2 = st.columns([4, 1])
                 c1.write(f"{r.name} — {r.price:g} ج")
-                if c2.button("حذف", key=f"di{r.id}"):
-                    delete_item(r.id)
-                    refresh()
+                if c2.button("تعديل", key=f"di{r.id}"):
+                    edit_dialog(r.id, r.name, r.price)
 
 # ---------------- التقارير ----------------
 def money(v):
