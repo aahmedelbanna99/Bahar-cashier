@@ -300,6 +300,12 @@ def delete_cat(name):
             c.execute("delete from items where category=?", (name,))
 
 
+@st.cache_data(ttl=20)
+def next_no_cached(_day):
+    # نسخة مؤقتة للعرض بس (مع جوجل شيت) عشان مانقراش الشيت كله مع كل ضغطة
+    return next_no(datetime.now(TZ))
+
+
 def category_groups(items):
     cats = read_cats()
     other = items[~items["category"].isin(cats)]
@@ -352,8 +358,11 @@ with tab_sale:
 
     st.markdown("<h3 style='text-align:center'>الفاتورة</h3>", unsafe_allow_html=True)
     subtotal = 0.0
-    if not cart:
-        st.markdown("<div style='text-align:center;opacity:.6'>لم تختر منتجات بعد</div>", unsafe_allow_html=True)
+    now_no = next_no_cached(str(biz_day(datetime.now(TZ)))) if SHEETS else next_no(datetime.now(TZ))
+    st.markdown(
+        f"<div style='text-align:center;font-size:1.15rem'>رقم الفاتورة ( <b>{ar(now_no)}</b> )</div>",
+        unsafe_allow_html=True,
+    )
     for i, n in enumerate(list(cart)):
         q = cart[n]
         line = q * float(price.get(n, 0))
