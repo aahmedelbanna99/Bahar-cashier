@@ -224,6 +224,7 @@ def add_dialog():
             st.error("اكتب اسم المنتج")
         else:
             add_item(n.strip(), p, cat)
+            st.session_state.cat = cat
             refresh()
 
 
@@ -235,12 +236,19 @@ with tab_items:
     groups = [(c, items[items["category"] == c]) for c in CATS]
     if not other.empty:
         groups.append(("غير مصنف", other))
-    for cat, sub in groups:
+    sel = st.session_state.get("cat")
+    cols = st.columns(len(groups))
+    for col, (cat, sub) in zip(cols, groups):
+        if col.button(f"{cat} ({len(sub)})", key=f"cat_{cat}", type="primary" if sel == cat else "secondary"):
+            st.session_state.cat = None if sel == cat else cat
+            st.rerun()
+    chosen = dict(groups).get(sel)
+    if chosen is not None:
         with st.container(border=True):
-            st.subheader(f"{cat} ({len(sub)})")
-            if sub.empty:
+            st.subheader(sel)
+            if chosen.empty:
                 st.caption("لا توجد منتجات في هذا التصنيف")
-            for r in sub.itertuples():
+            for r in chosen.itertuples():
                 c1, c2 = st.columns([4, 1])
                 c1.write(f"{r.name} — {r.price:g} ج")
                 if c2.button("حذف", key=f"di{r.id}"):
