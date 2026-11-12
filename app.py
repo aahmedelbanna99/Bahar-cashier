@@ -273,6 +273,16 @@ def rename_cat(old, new):
             c.execute("update items set category=? where category=?", (new, old))
 
 
+def delete_items(ids):
+    if SHEETS:
+        ws = book().worksheet("items")
+        for r in sorted((int(i) for i in ids), reverse=True):
+            ws.delete_rows(r)
+    else:
+        with conn() as c:
+            c.executemany("delete from items where id=?", [(int(i),) for i in ids])
+
+
 def delete_cat(name):
     # حذف التصنيف بيمسح كمان كل المنتجات اللي جواه (المبيعات القديمة مبتتأثرش)
     if SHEETS:
@@ -436,6 +446,17 @@ def edit_dialog(item_id, name, price, category):
         refresh()
 
 
+@st.dialog("حذف غير مصنف")
+def del_uncls_dialog(ids, names):
+    st.warning(f"هيتمسح {ar(len(names))} منتج: " + "، ".join(names))
+    if st.button("🗑️ نعم، احذف", type="primary"):
+        delete_items(ids)
+        for nm in names:
+            st.session_state.get("cart", {}).pop(nm, None)
+        st.session_state.cat = None
+        refresh()
+
+
 @st.dialog("تصنيف جديد")
 def add_cat_dialog():
     n = st.text_input("اسم التصنيف").strip()
@@ -500,6 +521,8 @@ with tab_items:
                 h1.subheader(cat)
                 if cat in cats and h2.button("✏️ تعديل التصنيف", key="ec"):
                     edit_cat_dialog(cat)
+                elif cat == UNCLS and h2.button("🗑️ حذف الكل", key="eu"):
+                    del_uncls_dialog([int(x) for x in sub["id"]], list(sub["name"]))
                 if sub.empty:
                     st.caption("لا توجد منتجات في هذا التصنيف")
                 for r in sub.itertuples():
