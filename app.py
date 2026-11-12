@@ -1,4 +1,5 @@
-import sqlite3
+APP_PASSWORD = "الرقم السري اللي تختارهimport sqlite3
+from html import escape
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -8,7 +9,7 @@ import streamlit as st
 TZ = ZoneInfo("Africa/Cairo")
 MN = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 CATS = ["برفان تركيب", "مباخر", "زجاج مركات"]
-SALES_COLS = ["invoice", "datetime", "item", "qty", "price", "total", "customer", "phone", "order_type", "discount"]
+SALES_COLS = ["invoice", "datetime", "item", "qty", "price", "total", "customer", "phone", "order_type", "discount", "address", "delivery_fee"]
 
 st.set_page_config(page_title="نظام الكاشير", page_icon="🧾", layout="wide")
 st.markdown(
@@ -17,6 +18,9 @@ st.markdown(
 [data-testid="stHorizontalBlock"]{flex-wrap:wrap;gap:.5rem}
 [data-testid="stColumn"],[data-testid="column"]{min-width:28% !important;flex:1 1 28% !important}
 .stButton button{width:100%;min-height:3rem}
+[class*="st-key-crow"] [data-testid="stHorizontalBlock"]{flex-wrap:nowrap}
+[class*="st-key-crow"] [data-testid="stColumn"],[class*="st-key-crow"] [data-testid="column"]{min-width:0 !important;flex:1 1 0 !important}
+[class*="st-key-crow"] [data-testid="stColumn"]:nth-child(2),[class*="st-key-crow"] [data-testid="column"]:nth-child(2){flex:5 1 0 !important}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:.5rem 0 1rem}
 .kc{border:1px solid rgba(128,128,128,.35);border-radius:12px;padding:.7rem .9rem}
 .kc small{opacity:.7;display:block}
@@ -69,11 +73,13 @@ def conn():
     c.execute(
         "create table if not exists sales(id integer primary key autoincrement, invoice text, "
         "datetime text, item text, qty integer, price real, total real, customer text default '', "
-        "phone text default '', order_type text default '', discount real default 0)"
+        "phone text default '', order_type text default '', discount real default 0, "
+        "address text default '', delivery_fee real default 0)"
     )
     have = [r[1] for r in c.execute("pragma table_info(sales)")]
     for col, typ in (("customer", "text default ''"), ("phone", "text default ''"),
-                     ("order_type", "text default ''"), ("discount", "real default 0")):
+                     ("order_type", "text default ''"), ("discount", "real default 0"),
+                     ("address", "text default ''"), ("delivery_fee", "real default 0")):
         if col not in have:
             c.execute(f"alter table sales add column {col} {typ}")
     return c
@@ -146,7 +152,7 @@ def read_sales():
         return df
     with conn() as c:
         return pd.read_sql(
-            "select invoice, datetime, item, qty, price, total, customer, phone, order_type, discount "
+            "select invoice, datetime, item, qty, price, total, customer, phone, order_type, discount, address, delivery_fee "
             "from sales order by id", c)
 
 
@@ -156,8 +162,8 @@ def add_sales(rows):
     else:
         with conn() as c:
             c.executemany(
-                "insert into sales(invoice, datetime, item, qty, price, total, customer, phone, order_type, discount) "
-                "values(?,?,?,?,?,?,?,?,?,?)", rows)
+                "insert into sales(invoice, datetime, item, qty, price, total, customer, phone, order_type, discount, "
+                "address, delivery_fee) values(?,?,?,?,?,?,?,?,?,?,?,?)", rows)
 
 
 def delete_invoice(inv):
@@ -219,33 +225,40 @@ with tab_sale:
                     cart[r.name] = cart.get(r.name, 0) + 1
                     st.rerun()
 
-    st.subheader("الفاتورة")
+    st.markdown("<h3 style='text-align:center'>الفاتورة</h3>", unsafe_allow_html=True)
     subtotal = 0.0
     if not cart:
-        st.caption("لم تختر منتجات بعد")
-    for n in list(cart):
+        st.markdown("<div style='text-align:center;opacity:.6'>لم تختر منتجات بعد</div>", unsafe_allow_html=True)
+    for i, n in enumerate(list(cart)):
         q = cart[n]
         line = q * float(price.get(n, 0))
         subtotal += line
-        c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
-        c1.write(f"{n} — {line:g} ج")
-        if c2.button("−", key=f"m{n}"):
-            cart[n] -= 1
-            if cart[n] <= 0:
-                del cart[n]
-            st.rerun()
-        c3.write(f"**{q}**")
-        if c4.button("+", key=f"p{n}"):
-            cart[n] += 1
-            st.rerun()
+        with st.container(key=f"crow{i}"):
+            cp, ct, cm = st.columns([1, 5, 1])
+            if cp.button("+", key=f"p{n}"):
+                cart[n] += 1
+                st.rerun()
+            ct.markdown(
+                f"<div style='text-align:center'><b>{escape(n)}</b> × {q}<br>{line:g} ج</div>",
+                unsafe_allow_html=True,
+            )
+            if cm.button("−", key=f"m{n}"):
+                cart[n] -= 1
+                if cart[n] <= 0:
+                    del cart[n]
+                st.rerun()
 
     with st.container(border=True):
         cust = st.text_input("اسم العميل", key=f"cust{fv}")
         phone = st.text_input("رقم التلفون", key=f"ph{fv}")
         otype = st.radio("نوع الطلب", ["استلام", "توصيل"], horizontal=True, key=f"ot{fv}")
+        addr, fee = "", 0.0
+        if otype == "توصيل":
+            addr = st.text_input("العنوان", key=f"ad{fv}")
+            fee = st.number_input("خدمة توصيل (سعر)", min_value=0.0, step=1.0, key=f"fe{fv}")
         st.markdown(f"**إجمالي الفاتورة:** {subtotal:g} ج")
         disc = st.number_input("خصم (مبلغ)", min_value=0.0, step=1.0, key=f"dc{fv}")
-        net = subtotal - disc
+        net = subtotal - disc + fee
         st.markdown(f"### صافي الفاتورة: {max(net, 0):g} ج.م")
         if disc > subtotal:
             st.error("الخصم أكبر من إجمالي الفاتورة")
@@ -258,7 +271,8 @@ with tab_sale:
         for i, (n, q) in enumerate(cart.items()):
             if n in price:
                 rows.append([inv, ts, n, int(q), float(price[n]), float(q * price[n]),
-                             cust.strip(), phone.strip(), otype, float(disc) if i == 0 else 0.0])
+                             cust.strip(), phone.strip(), otype, float(disc) if i == 0 else 0.0,
+                             addr.strip(), float(fee) if i == 0 else 0.0])
         add_sales(rows)
         st.session_state.cart = {}
         st.session_state.fv = fv + 1
@@ -341,8 +355,12 @@ with tab_rep:
     else:
         s["dt"] = pd.to_datetime(s["datetime"])
         s["qty"] = pd.to_numeric(s["qty"], errors="coerce").fillna(0)
-        # الإجمالي هنا = صافي بعد الخصم (الخصم متسجل في أول سطر من كل فاتورة)
-        s["total"] = pd.to_numeric(s["total"], errors="coerce").fillna(0) - pd.to_numeric(s["discount"], errors="coerce").fillna(0)
+        # الإجمالي هنا = الصافي: ناقص الخصم وزائد خدمة التوصيل (متسجلين في أول سطر من كل فاتورة)
+        s["total"] = (
+            pd.to_numeric(s["total"], errors="coerce").fillna(0)
+            - pd.to_numeric(s["discount"], errors="coerce").fillna(0)
+            + pd.to_numeric(s["delivery_fee"], errors="coerce").fillna(0)
+        )
         s["day"] = s["dt"].dt.strftime("%Y-%m-%d")
         s["month"] = s["dt"].dt.strftime("%Y-%m")
 
@@ -382,7 +400,7 @@ with tab_rep:
             for inv, g in df.groupby("invoice", sort=False):
                 c1, c2 = st.columns([4, 1])
                 desc = "، ".join(f"{r.item}×{r.qty}" for r in g.itertuples())
-                who = " | ".join(x for x in (clean(g["customer"].iloc[0]), clean(g["phone"].iloc[0]), clean(g["order_type"].iloc[0])) if x)
+                who = " | ".join(x for x in (clean(g["customer"].iloc[0]), clean(g["phone"].iloc[0]), clean(g["order_type"].iloc[0]), clean(g["address"].iloc[0])) if x)
                 c1.write(f"{g['dt'].iloc[0]:%H:%M} — {desc} — **{g['total'].sum():g} ج**" + (f"  \n{who}" if who else ""))
                 if c2.button("حذف", key=f"ds{inv}"):
                     delete_invoice(inv)
