@@ -8,7 +8,7 @@ import streamlit as st
 TZ = ZoneInfo("Africa/Cairo")
 MN = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 CATS = ["برفان تركيب", "مباخر", "زجاج مركات"]
-SALES_COLS = ["invoice", "datetime", "item", "qty", "price", "total"]
+SALES_COLS = ["invoice", "datetime", "item", "qty", "price", "total", "customer", "phone", "order_type", "discount"]
 
 st.set_page_config(page_title="نظام الكاشير", page_icon="🧾", layout="wide")
 st.markdown(
@@ -68,8 +68,14 @@ def conn():
         c.execute("alter table items add column category text default ''")
     c.execute(
         "create table if not exists sales(id integer primary key autoincrement, invoice text, "
-        "datetime text, item text, qty integer, price real, total real)"
+        "datetime text, item text, qty integer, price real, total real, customer text default '', "
+        "phone text default '', order_type text default '', discount real default 0)"
     )
+    have = [r[1] for r in c.execute("pragma table_info(sales)")]
+    for col, typ in (("customer", "text default ''"), ("phone", "text default ''"),
+                     ("order_type", "text default ''"), ("discount", "real default 0")):
+        if col not in have:
+            c.execute(f"alter table sales add column {col} {typ}")
     return c
 
 
@@ -87,11 +93,16 @@ if SHEETS:
                 sh.add_worksheet(name, rows=1000, cols=len(head)).append_row(head)
         if len(sh.worksheet("items").row_values(1)) < 3:
             sh.worksheet("items").update_cell(1, 3, "category")
+        ws = sh.worksheet("sales")
+        head = ws.row_values(1)
+        for i, col in enumerate(SALES_COLS, start=1):
+            if i > len(head):
+                ws.update_cell(1, i, col)
         return sh
 
     @st.cache_data(ttl=30)
     def sheet_read(name):
-        rows = book().worksheet(name).get_all_records()
+        rows = book().worksheet(name).get_all_records(numericise_ignore=["all"] if name == "sales" else [])
         cols = ["name", "price", "category"] if name == "items" else SALES_COLS
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
 
@@ -128,9 +139,15 @@ def delete_item(item_id):
 
 def read_sales():
     if SHEETS:
-        return sheet_read("sales").copy()
+        df = sheet_read("sales").copy()
+        for col in SALES_COLS:
+            if col not in df:
+                df[col] = ""
+        return df
     with conn() as c:
-        return pd.read_sql("select invoice, datetime, item, qty, price, total from sales order by id", c)
+        return pd.read_sql(
+            "select invoice, datetime, item, qty, price, total, customer, phone, order_type, discount "
+            "from sales order by id", c)
 
 
 def add_sales(rows):
@@ -138,7 +155,9 @@ def add_sales(rows):
         book().worksheet("sales").append_rows(rows, value_input_option="RAW")
     else:
         with conn() as c:
-            c.executemany("insert into sales(invoice, datetime, item, qty, price, total) values(?,?,?,?,?,?)", rows)
+            c.executemany(
+                "insert into sales(invoice, datetime, item, qty, price, total, customer, phone, order_type, discount) "
+                "values(?,?,?,?,?,?,?,?,?,?)", rows)
 
 
 def delete_invoice(inv):
@@ -150,6 +169,14 @@ def delete_invoice(inv):
     else:
         with conn() as c:
             c.execute("delete from sales where invoice=?", (str(inv),))
+
+
+def category_groups(items):
+    other = items[~items["category"].isin(CATS)]
+    groups = [(c, items[items["category"] == c]) for c in CATS]
+    if not other.empty:
+        groups.append(("غير مصنف", other))
+    return groups
 
 
 def refresh():
@@ -169,49 +196,78 @@ tab_sale, tab_items, tab_rep = st.tabs(["البيع", "المنتجات", "ال�
 with tab_sale:
     items = read_items()
     cart = st.session_state.setdefault("cart", {})
-    if items.empty:
-        st.info("مفيش أصناف لسه. روح لتاب «الأصناف» وضيف أول صنف.")
-    else:
-        cols = st.columns(3)
-        for i, r in items.reset_index(drop=True).iterrows():
-            if cols[i % 3].button(f"{r['name']}\n{r['price']:g} ج", key=f"it{i}"):
-                cart[r["name"]] = cart.get(r["name"], 0) + 1
+    fv = st.session_state.setdefault("fv", 0)
     price = dict(zip(items["name"], items["price"]))
-    if cart:
-        st.subheader("الفاتورة الحالية")
-        total = 0.0
-        for n in list(cart):
-            q = cart[n]
-            line = q * float(price.get(n, 0))
-            total += line
-            c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
-            c1.write(f"{n} — {line:g} ج")
-            if c2.button("−", key=f"m{n}"):
-                cart[n] -= 1
-                if cart[n] <= 0:
-                    del cart[n]
+    groups = category_groups(items)
+
+    if items.empty:
+        st.info("مفيش منتجات لسه. روح لتاب «المنتجات» وضيف أول صنف.")
+    else:
+        ssel = st.session_state.get("scat")
+        tiles = st.columns(len(groups))
+        for col, (cat, sub) in zip(tiles, groups):
+            if col.button(f"{cat} ({len(sub)})", key=f"sc_{cat}", type="primary" if ssel == cat else "secondary"):
+                st.session_state.scat = None if ssel == cat else cat
                 st.rerun()
-            c3.write(f"**{q}**")
-            if c4.button("+", key=f"p{n}"):
-                cart[n] += 1
-                st.rerun()
-        st.markdown(f"### الإجمالي: {total:g} ج.م")
-        if st.button("✅ تأكيد البيع", type="primary"):
-            now = datetime.now(TZ)
-            inv = "F" + now.strftime("%y%m%d%H%M%S")
-            ts = now.strftime("%Y-%m-%d %H:%M:%S")
-            rows = [
-                [inv, ts, n, int(q), float(price[n]), float(q * price[n])]
-                for n, q in cart.items()
-                if n in price
-            ]
-            add_sales(rows)
-            st.session_state.cart = {}
-            st.session_state.flash = f"تم تسجيل الفاتورة بإجمالي {total:g} ج.م"
-            refresh()
-        if st.button("مسح الفاتورة"):
-            st.session_state.cart = {}
+        chosen = dict(groups).get(ssel)
+        if chosen is not None:
+            if chosen.empty:
+                st.caption("لا توجد منتجات في هذا التصنيف")
+            cols = st.columns(3)
+            for i, r in enumerate(chosen.itertuples()):
+                if cols[i % 3].button(f"{r.name}\n{r.price:g} ج", key=f"it{r.id}"):
+                    cart[r.name] = cart.get(r.name, 0) + 1
+                    st.rerun()
+
+    st.subheader("الفاتورة")
+    subtotal = 0.0
+    if not cart:
+        st.caption("لم تختر منتجات بعد")
+    for n in list(cart):
+        q = cart[n]
+        line = q * float(price.get(n, 0))
+        subtotal += line
+        c1, c2, c3, c4 = st.columns([4, 1, 1, 1])
+        c1.write(f"{n} — {line:g} ج")
+        if c2.button("−", key=f"m{n}"):
+            cart[n] -= 1
+            if cart[n] <= 0:
+                del cart[n]
             st.rerun()
+        c3.write(f"**{q}**")
+        if c4.button("+", key=f"p{n}"):
+            cart[n] += 1
+            st.rerun()
+
+    with st.container(border=True):
+        cust = st.text_input("اسم العميل", key=f"cust{fv}")
+        phone = st.text_input("رقم التلفون", key=f"ph{fv}")
+        otype = st.radio("نوع الطلب", ["استلام", "توصيل"], horizontal=True, key=f"ot{fv}")
+        st.markdown(f"**إجمالي الفاتورة:** {subtotal:g} ج")
+        disc = st.number_input("خصم (مبلغ)", min_value=0.0, step=1.0, key=f"dc{fv}")
+        net = subtotal - disc
+        st.markdown(f"### صافي الفاتورة: {max(net, 0):g} ج.م")
+        if disc > subtotal:
+            st.error("الخصم أكبر من إجمالي الفاتورة")
+
+    if st.button("✅ تأكيد البيع", type="primary", disabled=(not cart or disc > subtotal)):
+        now = datetime.now(TZ)
+        inv = "F" + now.strftime("%y%m%d%H%M%S")
+        ts = now.strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for i, (n, q) in enumerate(cart.items()):
+            if n in price:
+                rows.append([inv, ts, n, int(q), float(price[n]), float(q * price[n]),
+                             cust.strip(), phone.strip(), otype, float(disc) if i == 0 else 0.0])
+        add_sales(rows)
+        st.session_state.cart = {}
+        st.session_state.fv = fv + 1
+        st.session_state.flash = f"تم تسجيل الفاتورة — الصافي {net:g} ج.م"
+        refresh()
+    if cart and st.button("مسح الفاتورة"):
+        st.session_state.cart = {}
+        st.session_state.fv = fv + 1
+        st.rerun()
 
 # ---------------- المنتجات ----------------
 @st.dialog("إضافة صنف")
@@ -265,6 +321,11 @@ def cards(items):
     st.markdown(f"<div class='cards'>{html}</div>", unsafe_allow_html=True)
 
 
+def clean(v):
+    v = "" if v is None else str(v)
+    return "" if v.lower() == "nan" else v.strip()
+
+
 def top_items(df):
     top = df.groupby("item")["qty"].sum().sort_values(ascending=False).head(10)
     if top.empty:
@@ -279,8 +340,9 @@ with tab_rep:
         st.info("لا توجد مبيعات لسه.")
     else:
         s["dt"] = pd.to_datetime(s["datetime"])
-        s["total"] = pd.to_numeric(s["total"])
-        s["qty"] = pd.to_numeric(s["qty"])
+        s["qty"] = pd.to_numeric(s["qty"], errors="coerce").fillna(0)
+        # الإجمالي هنا = صافي بعد الخصم (الخصم متسجل في أول سطر من كل فاتورة)
+        s["total"] = pd.to_numeric(s["total"], errors="coerce").fillna(0) - pd.to_numeric(s["discount"], errors="coerce").fillna(0)
         s["day"] = s["dt"].dt.strftime("%Y-%m-%d")
         s["month"] = s["dt"].dt.strftime("%Y-%m")
 
@@ -320,7 +382,8 @@ with tab_rep:
             for inv, g in df.groupby("invoice", sort=False):
                 c1, c2 = st.columns([4, 1])
                 desc = "، ".join(f"{r.item}×{r.qty}" for r in g.itertuples())
-                c1.write(f"{g['dt'].iloc[0]:%H:%M} — {desc} — **{g['total'].sum():g} ج**")
+                who = " | ".join(x for x in (clean(g["customer"].iloc[0]), clean(g["phone"].iloc[0]), clean(g["order_type"].iloc[0])) if x)
+                c1.write(f"{g['dt'].iloc[0]:%H:%M} — {desc} — **{g['total'].sum():g} ج**" + (f"  \n{who}" if who else ""))
                 if c2.button("حذف", key=f"ds{inv}"):
                     delete_invoice(inv)
                     refresh()
