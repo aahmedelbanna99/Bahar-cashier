@@ -1,4 +1,4 @@
-APP_PASSWORD = "الرقم السري اللي تختارهimport sqlite3
+import sqlite3
 from html import escape
 from datetime import datetime
 from zoneinfo import ZoneInfo
