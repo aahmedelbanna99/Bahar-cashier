@@ -7,12 +7,13 @@ import streamlit as st
 
 TZ = ZoneInfo("Africa/Cairo")
 MN = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
+CATS = ["برفان تركيب", "مباخر", "زجاج مركات"]
 SALES_COLS = ["invoice", "datetime", "item", "qty", "price", "total"]
 
 st.set_page_config(page_title="نظام الكاشير", page_icon="🧾", layout="wide")
 st.markdown(
     """<style>
-.stApp{direction:rtl}
+.stApp,[data-testid="stDialog"]{direction:rtl}
 [data-testid="stHorizontalBlock"]{flex-wrap:wrap;gap:.5rem}
 [data-testid="stColumn"],[data-testid="column"]{min-width:28% !important;flex:1 1 28% !important}
 .stButton button{width:100%;min-height:3rem}
@@ -62,7 +63,9 @@ login()
 # بيتحول لوحده لـ Google Sheets.
 def conn():
     c = sqlite3.connect("cashier.db")
-    c.execute("create table if not exists items(id integer primary key autoincrement, name text, price real)")
+    c.execute("create table if not exists items(id integer primary key autoincrement, name text, price real, category text default '')")
+    if "category" not in [r[1] for r in c.execute("pragma table_info(items)")]:
+        c.execute("alter table items add column category text default ''")
     c.execute(
         "create table if not exists sales(id integer primary key autoincrement, invoice text, "
         "datetime text, item text, qty integer, price real, total real)"
@@ -77,35 +80,42 @@ if SHEETS:
     def book():
         gc = gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
         sh = gc.open_by_key(st.secrets["SHEET_ID"])
-        for name, head in (("items", ["name", "price"]), ("sales", SALES_COLS)):
+        for name, head in (("items", ["name", "price", "category"]), ("sales", SALES_COLS)):
             try:
                 sh.worksheet(name)
             except gspread.WorksheetNotFound:
                 sh.add_worksheet(name, rows=1000, cols=len(head)).append_row(head)
+        if len(sh.worksheet("items").row_values(1)) < 3:
+            sh.worksheet("items").update_cell(1, 3, "category")
         return sh
 
     @st.cache_data(ttl=30)
     def sheet_read(name):
         rows = book().worksheet(name).get_all_records()
-        cols = ["name", "price"] if name == "items" else SALES_COLS
+        cols = ["name", "price", "category"] if name == "items" else SALES_COLS
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
 
 
 def read_items():
     if SHEETS:
         df = sheet_read("items").copy()
+        if "category" not in df:
+            df["category"] = ""
         df["id"] = range(2, len(df) + 2)
+        df["category"] = df["category"].fillna("")
         return df
     with conn() as c:
-        return pd.read_sql("select id, name, price from items order by id", c)
+        df = pd.read_sql("select id, name, price, category from items order by id", c)
+    df["category"] = df["category"].fillna("")
+    return df
 
 
-def add_item(name, price):
+def add_item(name, price, category):
     if SHEETS:
-        book().worksheet("items").append_row([name, float(price)], value_input_option="RAW")
+        book().worksheet("items").append_row([name, float(price), category], value_input_option="RAW")
     else:
         with conn() as c:
-            c.execute("insert into items(name, price) values(?, ?)", (name, float(price)))
+            c.execute("insert into items(name, price, category) values(?, ?, ?)", (name, float(price), category))
 
 
 def delete_item(item_id):
@@ -153,7 +163,7 @@ if not SHEETS:
 if "flash" in st.session_state:
     st.success(st.session_state.pop("flash"))
 
-tab_sale, tab_items, tab_rep = st.tabs(["البيع", "الأصناف", "التقارير"])
+tab_sale, tab_items, tab_rep = st.tabs(["البيع", "المنتجات", "التقارير"])
 
 # ---------------- البيع ----------------
 with tab_sale:
@@ -203,22 +213,39 @@ with tab_sale:
             st.session_state.cart = {}
             st.rerun()
 
-# ---------------- الأصناف ----------------
+# ---------------- المنتجات ----------------
+@st.dialog("إضافة صنف")
+def add_dialog():
+    n = st.text_input("المنتج")
+    cat = st.selectbox("التصنيف", CATS)
+    p = st.number_input("السعر", min_value=0.0, step=0.5)
+    if st.button("حفظ", type="primary"):
+        if not n.strip():
+            st.error("اكتب اسم المنتج")
+        else:
+            add_item(n.strip(), p, cat)
+            refresh()
+
+
 with tab_items:
-    with st.form("add_item", clear_on_submit=True):
-        n = st.text_input("اسم الصنف")
-        p = st.number_input("السعر", min_value=0.0, step=0.5)
-        if st.form_submit_button("إضافة صنف") and n.strip():
-            add_item(n.strip(), p)
-            refresh()
+    if st.button("➕ إضافة صنف", type="primary"):
+        add_dialog()
     items = read_items()
-    st.subheader(f"الأصناف ({len(items)})")
-    for r in items.itertuples():
-        c1, c2 = st.columns([4, 1])
-        c1.write(f"{r.name} — {r.price:g} ج")
-        if c2.button("حذف", key=f"di{r.id}"):
-            delete_item(r.id)
-            refresh()
+    other = items[~items["category"].isin(CATS)]
+    groups = [(c, items[items["category"] == c]) for c in CATS]
+    if not other.empty:
+        groups.append(("غير مصنف", other))
+    for cat, sub in groups:
+        with st.container(border=True):
+            st.subheader(f"{cat} ({len(sub)})")
+            if sub.empty:
+                st.caption("لا توجد منتجات في هذا التصنيف")
+            for r in sub.itertuples():
+                c1, c2 = st.columns([4, 1])
+                c1.write(f"{r.name} — {r.price:g} ج")
+                if c2.button("حذف", key=f"di{r.id}"):
+                    delete_item(r.id)
+                    refresh()
 
 # ---------------- التقارير ----------------
 def money(v):
