@@ -238,6 +238,10 @@ def next_no(now):
     return max(mx, cnt) + 1
 
 
+def ar(n):
+    return str(n).translate(str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩"))
+
+
 def read_cats():
     if SHEETS:
         return list(sheet_cats())
@@ -481,26 +485,23 @@ with tab_items:
     sel = st.session_state.get("cat")
     if not groups:
         st.info("لا توجد تصنيفات. دوس «تصنيف جديد».")
-    else:
-        cols = st.columns(len(groups))
-        for col, (cat, sub) in zip(cols, groups):
-            if col.button(f"{cat} ({len(sub)})", key=f"cat_{cat}", type="primary" if sel == cat else "secondary"):
-                st.session_state.cat = None if sel == cat else cat
-                st.rerun()
-    chosen = dict(groups).get(sel)
-    if chosen is not None:
-        with st.container(border=True):
-            h1, h2 = st.columns([3, 2])
-            h1.subheader(sel)
-            if sel in cats and h2.button("✏️ تعديل التصنيف", key="ec"):
-                edit_cat_dialog(sel)
-            if chosen.empty:
-                st.caption("لا توجد منتجات في هذا التصنيف")
-            for r in chosen.itertuples():
-                c1, c2 = st.columns([4, 1])
-                c1.write(f"{r.name} — {r.price:g} ج")
-                if c2.button("تعديل", key=f"di{r.id}"):
-                    edit_dialog(r.id, r.name, r.price, r.category)
+    for i, (cat, sub) in enumerate(groups, start=1):
+        if st.button(f"{ar(i)}. {cat} ({ar(len(sub))})", key=f"cat_{cat}", type="primary" if sel == cat else "secondary"):
+            st.session_state.cat = None if sel == cat else cat
+            st.rerun()
+        if sel == cat:
+            with st.container(border=True):
+                h1, h2 = st.columns([3, 2])
+                h1.subheader(cat)
+                if cat in cats and h2.button("✏️ تعديل التصنيف", key="ec"):
+                    edit_cat_dialog(cat)
+                if sub.empty:
+                    st.caption("لا توجد منتجات في هذا التصنيف")
+                for r in sub.itertuples():
+                    c1, c2 = st.columns([4, 1])
+                    c1.write(f"{r.name} — {r.price:g} ج")
+                    if c2.button("تعديل", key=f"di{r.id}"):
+                        edit_dialog(r.id, r.name, r.price, r.category)
 
 # ---------------- التقارير ----------------
 def money(v):
