@@ -274,20 +274,20 @@ def rename_cat(old, new):
 
 
 def delete_cat(name):
-    # المنتجات اللي جواه بتنتقل لـ «غير مصنف» ومبتتمسحش
+    # حذف التصنيف بيمسح كمان كل المنتجات اللي جواه (المبيعات القديمة مبتتأثرش)
     if SHEETS:
         ws = book().worksheet("categories")
         names = ws.col_values(1)
         if name in names:
             ws.delete_rows(names.index(name) + 1)
         it = book().worksheet("items")
-        for i, v in enumerate(it.col_values(3), start=1):
-            if v == name:
-                it.update_cell(i, 3, "")
+        rows = [i for i, v in enumerate(it.col_values(3), start=1) if i > 1 and v == name]
+        for r in sorted(rows, reverse=True):
+            it.delete_rows(r)
     else:
         with conn() as c:
             c.execute("delete from categories where name=?", (name,))
-            c.execute("update items set category='' where category=?", (name,))
+            c.execute("delete from items where category=?", (name,))
 
 
 def category_groups(items):
@@ -464,9 +464,14 @@ def edit_cat_dialog(name):
                 if st.session_state.get(k) == name:
                     st.session_state[k] = n
             refresh()
-    st.caption("لو حذفت التصنيف، المنتجات اللي جواه هتنتقل لـ «غير مصنف» ومش هتتمسح.")
-    if st.button("🗑️ حذف التصنيف"):
+    inside = read_items()
+    names = list(inside[inside["category"] == name]["name"])
+    if names:
+        st.warning(f"حذف التصنيف هيمسح كمان {ar(len(names))} منتج جواه.")
+    if st.button("🗑️ حذف التصنيف" + (" ومنتجاته" if names else "")):
         delete_cat(name)
+        for nm in names:
+            st.session_state.get("cart", {}).pop(nm, None)
         for k in ("cat", "scat"):
             if st.session_state.get(k) == name:
                 st.session_state[k] = None
