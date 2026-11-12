@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 TZ = ZoneInfo("Africa/Cairo")
+MN = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 SALES_COLS = ["invoice", "datetime", "item", "qty", "price", "total"]
 
 st.set_page_config(page_title="نظام الكاشير", page_icon="🧾", layout="wide")
@@ -15,6 +16,10 @@ st.markdown(
 [data-testid="stHorizontalBlock"]{flex-wrap:wrap;gap:.5rem}
 [data-testid="stColumn"],[data-testid="column"]{min-width:28% !important;flex:1 1 28% !important}
 .stButton button{width:100%;min-height:3rem}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:.5rem 0 1rem}
+.kc{border:1px solid rgba(128,128,128,.35);border-radius:12px;padding:.7rem .9rem}
+.kc small{opacity:.7;display:block}
+.kc b{display:block;font-size:1.3rem;margin-top:.2rem}
 </style>""",
     unsafe_allow_html=True,
 )
@@ -216,6 +221,23 @@ with tab_items:
             refresh()
 
 # ---------------- التقارير ----------------
+def money(v):
+    return f"{v:,.2f} ج"
+
+
+def cards(items):
+    html = "".join(f"<div class='kc'><small>{a}</small><b>{b}</b></div>" for a, b in items)
+    st.markdown(f"<div class='cards'>{html}</div>", unsafe_allow_html=True)
+
+
+def top_items(df):
+    top = df.groupby("item")["qty"].sum().sort_values(ascending=False).head(10)
+    if top.empty:
+        st.write("لا مبيعات.")
+    else:
+        st.dataframe(top.rename_axis("الصنف").rename("الكمية"), use_container_width=True)
+
+
 with tab_rep:
     s = read_sales()
     if s.empty:
@@ -226,44 +248,71 @@ with tab_rep:
         s["qty"] = pd.to_numeric(s["qty"])
         s["day"] = s["dt"].dt.strftime("%Y-%m-%d")
         s["month"] = s["dt"].dt.strftime("%Y-%m")
-        s["year"] = s["dt"].dt.strftime("%Y")
 
         today = datetime.now(TZ).date()
-        day = st.date_input("اليوم", today).strftime("%Y-%m-%d")
-        months = sorted(set(s["month"]) | {today.strftime("%Y-%m")})
-        month = st.selectbox("الشهر", months, index=len(months) - 1)
-        year = month[:4]
+        cur_month = today.strftime("%Y-%m")
+        view = st.session_state.get("rep", "day")
 
-        m1, m2, m3, m4 = st.columns(4)
-        for col, label, df in (
-            (m1, "اليوم", s[s["day"] == day]),
-            (m2, "الشهر", s[s["month"] == month]),
-            (m3, f"سنة {year}", s[s["year"] == year]),
-            (m4, "الإجمالي الكلي", s),
-        ):
-            col.metric(label, f"{df['total'].sum():,.2f} ج", f"{df['invoice'].nunique()} فاتورة", delta_color="off")
+        b1, b2 = st.columns(2)
+        if b1.button("📅 تقارير مبيعات اليوم", type="primary" if view == "day" else "secondary", key="rb1"):
+            st.session_state.rep = "day"
+            st.rerun()
+        if b2.button("🗓️ تقارير مبيعات الشهر", type="primary" if view == "month" else "secondary", key="rb2"):
+            st.session_state.rep = "month"
+            st.rerun()
 
-        days = pd.date_range(f"{month}-01", periods=pd.Period(month).days_in_month)
-        per_day = s[s["month"] == month].groupby("day")["total"].sum()
-        st.subheader("مبيعات أيام الشهر")
-        st.bar_chart(per_day.reindex(days.strftime("%Y-%m-%d"), fill_value=0))
-
-        per_month = s[s["year"] == year].groupby("month")["total"].sum()
-        st.subheader(f"مبيعات شهور {year}")
-        st.bar_chart(per_month.reindex([f"{year}-{k:02d}" for k in range(1, 13)], fill_value=0))
-
-        st.subheader("أكتر الأصناف مبيعًا في الشهر")
-        top = s[s["month"] == month].groupby("item")["qty"].sum().sort_values(ascending=False).head(10)
-        st.dataframe(top.rename("الكمية"), use_container_width=True)
-
-        st.subheader("فواتير اليوم المختار")
-        day_df = s[s["day"] == day]
-        if day_df.empty:
-            st.write("لا فواتير.")
-        for inv, g in day_df.groupby("invoice", sort=False):
-            c1, c2 = st.columns([4, 1])
-            desc = "، ".join(f"{r.item}×{r.qty}" for r in g.itertuples())
-            c1.write(f"{g['dt'].iloc[0]:%H:%M} — {desc} — **{g['total'].sum():g} ج**")
-            if c2.button("حذف", key=f"ds{inv}"):
-                delete_invoice(inv)
-                refresh()
+        if view == "day":
+            d = st.date_input("اليوم", today)
+            day = d.strftime("%Y-%m-%d")
+            df = s[s["day"] == day]
+            st.subheader("مبيعات النهارده" if d == today else f"مبيعات يوم {day}")
+            n = df["invoice"].nunique()
+            tot = float(df["total"].sum())
+            cards([
+                ("إجمالي المبيعات", money(tot)),
+                ("عدد الفواتير", str(n)),
+                ("متوسط الفاتورة", money(tot / n if n else 0)),
+                ("عدد القطع المباعة", f"{int(df['qty'].sum())}"),
+            ])
+            st.subheader("المبيعات على مدار اليوم (بالساعة)")
+            hours = df.groupby(df["dt"].dt.strftime("%H"))["total"].sum()
+            st.bar_chart(hours.reindex([f"{h:02d}" for h in range(24)], fill_value=0))
+            st.subheader("أكتر الأصناف مبيعًا")
+            top_items(df)
+            st.subheader("الفواتير")
+            if df.empty:
+                st.write("لا فواتير.")
+            for inv, g in df.groupby("invoice", sort=False):
+                c1, c2 = st.columns([4, 1])
+                desc = "، ".join(f"{r.item}×{r.qty}" for r in g.itertuples())
+                c1.write(f"{g['dt'].iloc[0]:%H:%M} — {desc} — **{g['total'].sum():g} ج**")
+                if c2.button("حذف", key=f"ds{inv}"):
+                    delete_invoice(inv)
+                    refresh()
+        else:
+            months = sorted(set(s["month"]) | {cur_month})
+            month = st.selectbox(
+                "الشهر",
+                months,
+                index=months.index(cur_month),
+                format_func=lambda m: f"{MN[int(m[5:]) - 1]} {m[:4]}",
+            )
+            name = f"{MN[int(month[5:]) - 1]} {month[:4]}"
+            st.subheader(f"مبيعات شهر {name}" + (" (الشهر الحالي)" if month == cur_month else ""))
+            df = s[s["month"] == month]
+            n = df["invoice"].nunique()
+            tot = float(df["total"].sum())
+            per_day = df.groupby("day")["total"].sum()
+            best = f"يوم {per_day.idxmax()[8:]} — {money(per_day.max())}" if not per_day.empty else "—"
+            cards([
+                ("إجمالي الشهر", money(tot)),
+                ("عدد الفواتير", str(n)),
+                ("متوسط الفاتورة", money(tot / n if n else 0)),
+                ("أفضل يوم", best),
+            ])
+            st.subheader("مبيعات أيام الشهر")
+            days = pd.date_range(f"{month}-01", periods=pd.Period(month).days_in_month)
+            per_day.index = [d[8:] for d in per_day.index]
+            st.bar_chart(per_day.reindex([f"{d.day:02d}" for d in days], fill_value=0))
+            st.subheader("أكتر الأصناف مبيعًا في الشهر")
+            top_items(df)
