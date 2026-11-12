@@ -1,15 +1,16 @@
 import sqlite3
 from html import escape
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
 TZ = ZoneInfo("Africa/Cairo")
 MN = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 CATS = ["برفان تركيب", "مباخر", "زجاج مركات"]
-SALES_COLS = ["invoice", "datetime", "item", "qty", "price", "total", "customer", "phone", "order_type", "discount", "address", "delivery_fee"]
+SALES_COLS = ["invoice", "datetime", "item", "qty", "price", "total", "customer", "phone", "order_type", "discount", "address", "delivery_fee", "no"]
 
 st.set_page_config(page_title="نظام الكاشير", page_icon="🧾", layout="wide")
 st.markdown(
@@ -74,12 +75,13 @@ def conn():
         "create table if not exists sales(id integer primary key autoincrement, invoice text, "
         "datetime text, item text, qty integer, price real, total real, customer text default '', "
         "phone text default '', order_type text default '', discount real default 0, "
-        "address text default '', delivery_fee real default 0)"
+        "address text default '', delivery_fee real default 0, no integer default 0)"
     )
     have = [r[1] for r in c.execute("pragma table_info(sales)")]
     for col, typ in (("customer", "text default ''"), ("phone", "text default ''"),
                      ("order_type", "text default ''"), ("discount", "real default 0"),
-                     ("address", "text default ''"), ("delivery_fee", "real default 0")):
+                     ("address", "text default ''"), ("delivery_fee", "real default 0"),
+                     ("no", "integer default 0")):
         if col not in have:
             c.execute(f"alter table sales add column {col} {typ}")
     return c
@@ -152,7 +154,7 @@ def read_sales():
         return df
     with conn() as c:
         return pd.read_sql(
-            "select invoice, datetime, item, qty, price, total, customer, phone, order_type, discount, address, delivery_fee "
+            "select invoice, datetime, item, qty, price, total, customer, phone, order_type, discount, address, delivery_fee, no "
             "from sales order by id", c)
 
 
@@ -163,7 +165,7 @@ def add_sales(rows):
         with conn() as c:
             c.executemany(
                 "insert into sales(invoice, datetime, item, qty, price, total, customer, phone, order_type, discount, "
-                "address, delivery_fee) values(?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                "address, delivery_fee, no) values(?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
 
 
 def delete_invoice(inv):
@@ -175,6 +177,28 @@ def delete_invoice(inv):
     else:
         with conn() as c:
             c.execute("delete from sales where invoice=?", (str(inv),))
+
+
+def biz_day(now):
+    # يوم العمل بيبدأ ٩ الصبح وبينتهي ٥ الفجر: أي بيع قبل ٥ الفجر بيتحسب على اليوم اللي قبله
+    return (now - timedelta(hours=5)).date()
+
+
+def next_no(now):
+    bd = biz_day(now)
+    start = f"{bd} 05:00:00"
+    end = f"{bd + timedelta(days=1)} 05:00:00"
+    if SHEETS:
+        rows = book().worksheet("sales").get_all_records(numericise_ignore=["all"])
+        sel = [r for r in rows if start <= str(r.get("datetime", "")) < end]
+        nos = [int(float(r["no"])) for r in sel if str(r.get("no", "")).strip() not in ("", "0")]
+        return max(max(nos, default=0), len({r["invoice"] for r in sel})) + 1
+    with conn() as c:
+        mx, cnt = c.execute(
+            "select coalesce(max(no), 0), count(distinct invoice) from sales where datetime >= ? and datetime < ?",
+            (start, end),
+        ).fetchone()
+    return max(mx, cnt) + 1
 
 
 def category_groups(items):
@@ -266,17 +290,18 @@ with tab_sale:
     if st.button("✅ تأكيد البيع", type="primary", disabled=(not cart or disc > subtotal)):
         now = datetime.now(TZ)
         inv = "F" + now.strftime("%y%m%d%H%M%S")
+        no = next_no(now)
         ts = now.strftime("%Y-%m-%d %H:%M:%S")
         rows = []
         for i, (n, q) in enumerate(cart.items()):
             if n in price:
                 rows.append([inv, ts, n, int(q), float(price[n]), float(q * price[n]),
                              cust.strip(), phone.strip(), otype, float(disc) if i == 0 else 0.0,
-                             addr.strip(), float(fee) if i == 0 else 0.0])
+                             addr.strip(), float(fee) if i == 0 else 0.0, no])
         add_sales(rows)
         st.session_state.cart = {}
         st.session_state.fv = fv + 1
-        st.session_state.flash = f"تم تسجيل الفاتورة — الصافي {net:g} ج.م"
+        st.session_state.flash = f"تم تسجيل الفاتورة رقم {no} — الصافي {net:g} ج.م"
         refresh()
     if cart and st.button("مسح الفاتورة"):
         st.session_state.cart = {}
@@ -355,16 +380,17 @@ with tab_rep:
     else:
         s["dt"] = pd.to_datetime(s["datetime"])
         s["qty"] = pd.to_numeric(s["qty"], errors="coerce").fillna(0)
+        s["price"] = pd.to_numeric(s["price"], errors="coerce").fillna(0)
         # الإجمالي هنا = الصافي: ناقص الخصم وزائد خدمة التوصيل (متسجلين في أول سطر من كل فاتورة)
         s["total"] = (
             pd.to_numeric(s["total"], errors="coerce").fillna(0)
             - pd.to_numeric(s["discount"], errors="coerce").fillna(0)
             + pd.to_numeric(s["delivery_fee"], errors="coerce").fillna(0)
         )
-        s["day"] = s["dt"].dt.strftime("%Y-%m-%d")
-        s["month"] = s["dt"].dt.strftime("%Y-%m")
+        s["day"] = (s["dt"] - pd.Timedelta(hours=5)).dt.strftime("%Y-%m-%d")
+        s["month"] = s["day"].str[:7]
 
-        today = datetime.now(TZ).date()
+        today = biz_day(datetime.now(TZ))
         cur_month = today.strftime("%Y-%m")
         view = st.session_state.get("rep", "day")
 
@@ -391,20 +417,53 @@ with tab_rep:
             ])
             st.subheader("المبيعات على مدار اليوم (بالساعة)")
             hours = df.groupby(df["dt"].dt.strftime("%H"))["total"].sum()
-            st.bar_chart(hours.reindex([f"{h:02d}" for h in range(24)], fill_value=0))
+            extra = [h for h in range(5, 9) if hours.get(f"{h:02d}", 0) > 0]
+            labels = [f"{h:02d}" for h in extra + list(range(9, 24)) + list(range(0, 5))]
+            hdf = pd.DataFrame({"الساعة": labels, "المبيعات": [float(hours.get(h, 0)) for h in labels]})
+            st.altair_chart(
+                alt.Chart(hdf).mark_bar().encode(
+                    x=alt.X("الساعة:N", sort=labels, title=None), y=alt.Y("المبيعات:Q", title=None)
+                ),
+                use_container_width=True,
+            )
             st.subheader("أكتر الأصناف مبيعًا")
             top_items(df)
             st.subheader("الفواتير")
             if df.empty:
                 st.write("لا فواتير.")
+            order = list(dict.fromkeys(df.sort_values("dt")["invoice"]))
+            rank = {inv: i + 1 for i, inv in enumerate(order)}
+            invs = []
             for inv, g in df.groupby("invoice", sort=False):
-                c1, c2 = st.columns([4, 1])
-                desc = "، ".join(f"{r.item}×{r.qty}" for r in g.itertuples())
-                who = " | ".join(x for x in (clean(g["customer"].iloc[0]), clean(g["phone"].iloc[0]), clean(g["order_type"].iloc[0]), clean(g["address"].iloc[0])) if x)
-                c1.write(f"{g['dt'].iloc[0]:%H:%M} — {desc} — **{g['total'].sum():g} ج**" + (f"  \n{who}" if who else ""))
-                if c2.button("حذف", key=f"ds{inv}"):
-                    delete_invoice(inv)
-                    refresh()
+                stored = pd.to_numeric(g["no"].iloc[0], errors="coerce")
+                invs.append((int(stored) if pd.notna(stored) and stored > 0 else rank[inv], inv, g))
+            for no, inv, g in sorted(invs, key=lambda x: x[0]):
+                f = g.iloc[0]
+                sub = float((g["price"] * g["qty"]).sum())
+                disc = float(pd.to_numeric(g["discount"], errors="coerce").fillna(0).sum())
+                fee = float(pd.to_numeric(g["delivery_fee"], errors="coerce").fillna(0).sum())
+                with st.expander(f"فاتورة رقم {no} — {f['dt']:%H:%M} — {sub - disc + fee:g} ج"):
+                    for label, val in (
+                        ("العميل", clean(f["customer"])),
+                        ("التلفون", clean(f["phone"])),
+                        ("نوع الطلب", clean(f["order_type"])),
+                        ("العنوان", clean(f["address"])),
+                    ):
+                        if val:
+                            st.markdown(f"**{label}:** {val}")
+                    lines = g[["item", "qty", "price"]].copy()
+                    lines["total"] = lines["qty"] * lines["price"]
+                    lines.columns = ["الصنف", "الكمية", "السعر", "الإجمالي"]
+                    st.dataframe(lines, hide_index=True, use_container_width=True)
+                    st.markdown(f"**إجمالي الفاتورة:** {sub:g} ج")
+                    if disc:
+                        st.markdown(f"**الخصم:** {disc:g} ج")
+                    if fee:
+                        st.markdown(f"**خدمة التوصيل:** {fee:g} ج")
+                    st.markdown(f"### الصافي: {sub - disc + fee:g} ج")
+                    if st.button("حذف الفاتورة", key=f"ds{inv}"):
+                        delete_invoice(inv)
+                        refresh()
         else:
             months = sorted(set(s["month"]) | {cur_month})
             month = st.selectbox(
